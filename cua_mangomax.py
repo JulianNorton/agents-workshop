@@ -8,7 +8,7 @@ import asyncio
 import base64
 from playwright.async_api import async_playwright
 from imhuman import solve_captcha
-from agents import Agent, Runner, function_tool
+from agents import Agent, Runner, function_tool, ModelSettings  # added ModelSettings
 
 # Add a custom InputDict so that the input supports to_input_item()
 class InputDict(dict):
@@ -63,43 +63,54 @@ async def select_item_via_agent(page):
 
 # For mango_finder, update tool definitions:
 @function_tool
-def fill(text: str):
-    # Now only accepts text.
-    raise NotImplementedError("Tool 'fill' not implemented.")
-
-@function_tool
-def click_submit():
-    # No selector required.
-    raise NotImplementedError("Tool 'click_submit' not implemented.")
+async def search_query(query: str):
+    raise NotImplementedError("Tool 'search_query' not implemented.")
 
 async def mango_finder(page):
-    tools = [fill, click_submit]
+    tools = [search_query]  # Use the new search_query tool only.
     agent = Agent(
         name="Mango Finder",
         instructions=(
-            "You are an agent that helps perform a dynamic search for mango slices. "
-            "Respond with actions to 'fill' with 'mango slices' and then 'click_submit' when ready."
+            "You are a tool-enabled agent. To perform a search for mango slices, "
+            "you must call the tool 'search_query' with the query 'mango slices'. "
+            "Return only a JSON object representing the tool call without any additional text."
         ),
         tools=tools,
+        model_settings=ModelSettings(tool_choice="required")
     )
     page_content = await page.content()
     screenshot_bytes = await page.screenshot()
     screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
     input_data = [{"role": "user", "content": "Perform a search for mango slices."}]
-    result = await Runner.run(agent, input_data)
-    print(f"Agent Result: {result.final_output}")
-    # Process tool actions only if available and log them; no direct browser interaction.
+    
+    try:
+        print("Running Mango Finder agent with input:", input_data)
+        result = await Runner.run(agent, input_data)
+        print("Mango Finder agent completed successfully.")
+    except Exception as e:
+        print("Runner.run failed:", e)
+        # If available, print conversation history for debugging.
+        try:
+            convo = result.to_input_list()
+            print("Conversation history:", convo)
+        except Exception as history_err:
+            print("Failed to retrieve conversation history:", history_err)
+        raise
+
+    print(f"Mango Finder Agent Result: {result.final_output}")
+    # Process tool actions exclusively.
     if hasattr(result, "actions"):
         actions = result.actions if isinstance(result.actions, list) else [result.action]
         for action in actions:
-            if action.get("type") == "fill":
-                print(f"Agent requested fill action with text: {action.get('text')}")
-            elif action.get("type") == "click_submit":
-                print("Agent requested click_submit action.")
+            if action.get("type") == "search_query":
+                print(f"Agent requested search_query with query: {action.get('query')}")
+                # Execute the search using Playwright.
+                await page.fill("input#twotabsearchtextbox", action.get("query"))
+                await page.press("input#twotabsearchtextbox", "Enter")
             else:
                 print("Unknown action")
     else:
-        print("No tool actions found; agent output: ", result.final_output)
+        print("No tool actions returned; agent output: ", result.final_output)
     await page.wait_for_selector("div.s-main-slot", timeout=15000)
 
 async def run():
