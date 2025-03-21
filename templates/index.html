@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <link rel="stylesheet" type="text/css" href="../static/style.css">
+    <title>OpenAI Agentic Web App for Workshop</title>
+</head>
+<body>
+    <h1>Enter text to process</h1>
+    <form method="POST">
+        <input type="text" name="text" placeholder="Enter input here" required>
+        <button type="submit">Submit</button>
+    </form>
+
+    {% if result %}
+    <div id="result">
+        <h2>Main Agent Result:</h2>
+        <p>{{ result }}</p>
+    </div>
+    {% endif %}
+</body>
+</html>
