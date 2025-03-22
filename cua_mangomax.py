@@ -1,14 +1,13 @@
 import sys, os
-venv_path = os.path.join(os.path.dirname(__file__), "venv", "Lib", "site-packages")
-# if venv_path not in sys.path:
-#     sys.path.insert(0, venv_path)
-# print("sys.path:", sys.path)
-
 import asyncio
 import base64
-from playwright.async_api import async_playwright
+import json  # NEW IMPORT
 from imhuman import solve_captcha
-from agents import Agent, Runner, function_tool, ModelSettings  # added ModelSettings
+from agents import Agent, Runner, function_tool, ModelSettings
+from playwright.async_api import async_playwright
+from utils import create_response  # Assume you have a create_response() utility
+from mango_finder_agent import mango_finder_agent  # new import
+from select_item_agent import select_item_agent
 
 # Add a custom InputDict so that the input supports to_input_item()
 class InputDict(dict):
@@ -29,111 +28,79 @@ def click():
     # No selector needed now.
     raise NotImplementedError("Tool 'click' not implemented.")
 
-async def select_item_via_agent(page):
-    tools = [back, goto, click]
-
-    agent = Agent(
-        name="Amazon Mango Selector",
-        instructions=(
-            "You are an agent that helps select the first mango item on an Amazon search results page. "
-            "Respond with a JSON object that indicates a 'click' action (no selector needed) when the correct item is found."
-        ),
-        tools=tools,
-    )
-
-    # Get the current page content
-    page_content = await page.content()
-    screenshot_bytes = await page.screenshot()
-    screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-
-    # Simplified input: only "role" and "content"
-    input_data = [{"role": "user", "content": "Select the first mango item on the page."}]
-
-    # Run the agent via Runner.run instead of agent.run
-    result = await Runner.run(agent, input_data)
-    print(f"Agent Result: {result.final_output}")
-
-    # Use getattr() to safely retrieve an action.
-    action = getattr(result, "action", None)
-    if action and action.get("type") == "click":
-        print("Agent requested a click action.")
-        # Removed CSS click interaction – agentic only.
-    else:
-        print("No click action found in agent's output; skipping action.")
-
-# For mango_finder, update tool definitions:
-@function_tool
-async def search_query(query: str):
-    raise NotImplementedError("Tool 'search_query' not implemented.")
-
-async def mango_finder(page):
-    tools = [search_query]  # Use the new search_query tool only.
-    agent = Agent(
-        name="Mango Finder",
-        instructions=(
-            "You are a tool-enabled agent. To perform a search for mango slices, "
-            "you must call the tool 'search_query' with the query 'mango slices'. "
-            "Return only a JSON object representing the tool call without any additional text."
-        ),
-        tools=tools,
-        model_settings=ModelSettings(tool_choice="required")
-    )
-    page_content = await page.content()
-    screenshot_bytes = await page.screenshot()
-    screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-    input_data = [{"role": "user", "content": "Perform a search for mango slices."}]
-    
-    try:
-        print("Running Mango Finder agent with input:", input_data)
-        result = await Runner.run(agent, input_data)
-        print("Mango Finder agent completed successfully.")
-    except Exception as e:
-        print("Runner.run failed:", e)
-        # If available, print conversation history for debugging.
+# New supervisor function that decides which agent to call based on task context.
+async def agentic_supervisor(page):
+    conversation = []
+    max_turns = 3
+    turn = 0
+    done = False
+    while not done and turn < max_turns:
+        # Step 1: Capture a full-page screenshot and excerpt from page content.
+        screenshot_bytes = await page.screenshot(full_page=True)
+        screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+        page_content = await page.content()
+        excerpt = page_content[:500]  # first 500 characters
+        
+        # Step 2: Build the supervisor system prompt.
+        supervisor_prompt = (
+            "You are a supervisor agent whose goal is to order mangos. "
+            "Based on the provided screenshot (as a base64 image) and page excerpt, decide which agent to invoke next. "
+            "Available agents are: Mango Finder (to search for mango products) and Select Item (to choose a specific mango item from search results). "
+            "If ordering is complete, return {\"agent\": \"Order Complete\"}. "
+            "Return a JSON object exactly in this format: {\"agent\": \"Mango Finder\"} or {\"agent\": \"Select Item\"} or {\"agent\": \"Order Complete\"}."
+        )
+        
+        # Append the supervisor prompt and context to the conversation.
+        conversation.append({
+            "role": "user",
+            "content": supervisor_prompt,
+            "image": f"data:image/png;base64,{screenshot_base64}",
+            "page_excerpt": excerpt
+        })
+        
+        # Step 3: Get supervisor decision. (Using dummy create_response here.)
+        supervisor_response = create_response(model="supervisor-model", input=conversation, tools=[])
         try:
-            convo = result.to_input_list()
-            print("Conversation history:", convo)
-        except Exception as history_err:
-            print("Failed to retrieve conversation history:", history_err)
-        raise
+            resp_json = json.loads(supervisor_response["output"][0]["content"])
+            chosen_agent = resp_json.get("agent")
+        except Exception as e:
+            print("Supervisor decision error:", e)
+            chosen_agent = None
+        
+        print("Supervisor decided to invoke agent:", chosen_agent)
+        
+        # Step 4: Invoke the chosen agent.
+        if chosen_agent == "Mango Finder":
+            await mango_finder_agent(page)
+        elif chosen_agent == "Select Item":
+            selection_result = await select_item_agent(page)
+            print("Selection agent response:", selection_result.final_output)
+        elif chosen_agent == "Order Complete":
+            print("Ordering complete. Supervisor handing off.")
+            done = True
+            break
+        else:
+            print("No valid supervisor decision; defaulting to Mango Finder then Select Item.")
+            await mango_finder_agent(page)
+            selection_result = await select_item_agent(page)
+            print("Selection agent response:", selection_result.final_output)
+        
+        # Add the result of this turn to the conversation.
+        conversation.append({
+            "role": "assistant",
+            "content": f"Agent {chosen_agent if chosen_agent else 'default'} executed."
+        })
+        turn += 1
+        
+    return
 
-    print(f"Mango Finder Agent Result: {result.final_output}")
-    # Process tool actions exclusively.
-    if hasattr(result, "actions"):
-        actions = result.actions if isinstance(result.actions, list) else [result.action]
-        for action in actions:
-            if action.get("type") == "search_query":
-                print(f"Agent requested search_query with query: {action.get('query')}")
-                # Execute the search using Playwright.
-                await page.fill("input#twotabsearchtextbox", action.get("query"))
-                await page.press("input#twotabsearchtextbox", "Enter")
-            else:
-                print("Unknown action")
-    else:
-        print("No tool actions returned; agent output: ", result.final_output)
-    await page.wait_for_selector("div.s-main-slot", timeout=15000)
-
-async def run():
+async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         page = await browser.new_page()
-        # Navigate to Amazon
-        await page.goto("https://www.amazon.com")
-        
-        # Use imhuman's solve_captcha to handle any CAPTCHA challenge
-        await solve_captcha(page)
-        
-        # Mango search using agent instead of hardcoded fill and press
-        await mango_finder(page)
-        
-        # Use the agent to decide which item to select
-        await select_item_via_agent(page)
-        
-        await page.wait_for_selector("#add-to-cart-button", timeout=100000)
-        await page.click("#add-to-cart-button")
-        print("Item added to cart. Stopping.")
+        await agentic_supervisor(page)
         await asyncio.sleep(2)
         await browser.close()
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(main())

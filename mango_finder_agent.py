@@ -1,61 +1,63 @@
 import asyncio
 import base64
 from playwright.async_api import Page
-from agents import Agent, Runner
+from agents import Agent, Runner, function_tool
 
-# Custom InputDict to support to_input_item()
 class InputDict(dict):
     def to_input_item(self):
         return self
 
+@function_tool
+async def click_at(x: float, y: float, button: str) -> dict:
+    # Dummy tool: returns the click coordinates as confirmation.
+    return {"action_result": f"Clicked at ({x},{y}) with {button} button"}
+
+async def handle_model_action(page: Page, action: dict):
+    """
+    Execute the model action based solely on LLM output.
+    Expected action format:
+      {"type": "click", "x": <number>, "y": <number>, "button": "left"}
+    """
+    action_type = action.get("type")
+    try:
+        match action_type:
+            case "click":
+                x = action.get("x")
+                y = action.get("y")
+                button = action.get("button", "left")
+                print(f"Action: click at ({x}, {y}) with button '{button}'")
+                await page.mouse.click(x, y, button=button)
+            case _:
+                print(f"Unrecognized action: {action}")
+    except Exception as e:
+        print(f"Error handling action {action}: {e}")
+
 async def mango_finder_agent(page: Page):
-    tool_defs = [
-        {
-            "type": "function",
-            "name": "fill",
-            "description": "Fill an input element with given text.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string", "description": "CSS selector of the input element."},
-                    "text": {"type": "string", "description": "Text to input."}
-                },
-                "additionalProperties": False,
-                "required": ["selector", "text"]
-            }
-        },
-        {
-            "type": "function",
-            "name": "click_submit",
-            "description": "Click the search submit button to submit the query. Since the agent only sees an image, it should identify a clear submit button.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string", "description": "CSS selector of the submit button."}
-                },
-                "additionalProperties": False,
-                "required": ["selector"]
-            }
-        }
-    ]
-    # Use plain dictionaries directly
-    tools = tool_defs
+    tools = [click_at]
     agent = Agent(
         name="Mango Finder",
         instructions=(
-            "You are an agent that helps perform a dynamic search for mango slices. "
-            "Identify the search input field on the page and respond with actions to fill it with 'mango slices', "
-            "then identify and click the submit button to run the search."
+            "You are a tool-enabled agent. To perform a click on the page, "
+            "you must call the tool 'click_at' with the x and y coordinates "
+            "where you want to click. Return only a single JSON object in the following format: "
+            '{"type": "click", "x": 100, "y": 200, "button": "left"} and nothing else.'
         ),
         tools=tools
     )
-    page_content = await page.content()
-    screenshot_bytes = await page.screenshot()
-    screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-    input_data = [InputDict({
-        "page_content": page_content,
-        "screenshot": f"data:image/png;base64,{screenshot_base64}",
-        "message": "Perform a search for mango slices."
-    })]
-    result = await Runner.run(agent, input_data)
-    return result
+    input_data = [{"role": "user", "content": "Perform a click action using the provided coordinates."}]
+    result = await Runner.run(agent, input_data, max_turns=2)
+    print(f"Mango Finder Agent Result: {result.final_output}")
+    if hasattr(result, "actions") and result.actions:
+        actions = result.actions if isinstance(result.actions, list) else [result.action]
+        for action in actions:
+            if action.get("type") == "click":
+                print(f"Agent requested click at coordinates: x={action.get('x')}, y={action.get('y')}, button={action.get('button')}")
+                await handle_model_action(page, action)
+            else:
+                print("Unknown action")
+    else:
+        # Fallback: default click coordinates if the agent didn't provide any tool call.
+        default_action = {"type": "click", "x": 100, "y": 200, "button": "left"}
+        print("No valid tool action returned; using default click coordinates:")
+        print(f"Default action: {default_action}")
+        await handle_model_action(page, default_action)

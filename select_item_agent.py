@@ -2,6 +2,7 @@ import asyncio
 import base64
 from playwright.async_api import Page
 from agents import Agent, Runner
+from types import SimpleNamespace   # NEW IMPORT
 
 # Custom InputDict to support to_input_item()
 class InputDict(dict):
@@ -49,7 +50,7 @@ async def select_item_agent(page: Page):
             },
         },
     ]
-    # Use plain dictionaries directly
+    # Use the dictionary definitions directly.
     tools = tools_defs
     agent = Agent(
         name="Amazon Mango Selector",
