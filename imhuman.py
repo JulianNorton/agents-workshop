@@ -3,7 +3,7 @@ import asyncio
 import base64
 import json
 import re
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
 from playwright.async_api import Page
 from agents import Agent, Runner
 from openai import OpenAI
@@ -15,14 +15,9 @@ captcha_ocr_agent = Agent(
     model="gpt-4o"  # Using the most capable model for CAPTCHA solving
 )
 
-async def solve_captcha(page: Page) -> str:
+async def solve_captcha(page: Page) -> Dict:
     """
-    Improved CAPTCHA solver that:
-    1. Takes a screenshot of the page
-    2. Uses GPT-4o to analyze the CAPTCHA, find the input field, and identify the submit button
-    3. Provides multiple potential solutions with confidence ratings
-    4. Enters the highest confidence solution and submits the form
-    5. Returns the result
+    Simplified CAPTCHA solver with robust error handling
     """
     # Wait for the page to load completely
     await page.wait_for_load_state("networkidle")
@@ -32,24 +27,11 @@ async def solve_captcha(page: Page) -> str:
     screenshot_bytes = await page.screenshot(full_page=True)
     screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
     
-    # Step 1: Get multiple CAPTCHA solutions using different methods
-    captcha_solutions = await get_multiple_captcha_solutions(screenshot_base64)
+    # Get CAPTCHA text using simplified approach
+    captcha_text = await simple_captcha_solve(screenshot_base64)
+    print(f"Detected CAPTCHA solution: {captcha_text}")
     
-    # Print all solutions with confidence
-    print("\nPotential CAPTCHA solutions:")
-    for solution, confidence in captcha_solutions:
-        print(f"  • '{solution}' (confidence: {confidence}%)")
-    
-    # Get the highest confidence solution
-    if captcha_solutions:
-        captcha_text, confidence = captcha_solutions[0]
-        print(f"\nUsing highest confidence solution: '{captcha_text}' ({confidence}%)")
-    else:
-        # Fallback approach - try direct OCR as last resort
-        print("All solution methods failed, using emergency OCR...")
-        captcha_text = await emergency_ocr(screenshot_base64)
-    
-    # Step 2: Find the input field - try multiple common selectors
+    # Find input field
     input_field = None
     for selector in [
         "input[type='text']", 
@@ -58,8 +40,8 @@ async def solve_captcha(page: Page) -> str:
         "input.captcha-input",
         "input[name*='captcha']",
         "input[id*='captcha']",
-        "form input", # Generic form inputs
-        "input:not([type='hidden'])" # Any visible input
+        "form input", 
+        "input:not([type='hidden'])" 
     ]:
         try:
             input_field = await page.query_selector(selector)
@@ -67,10 +49,9 @@ async def solve_captcha(page: Page) -> str:
                 print(f"Found CAPTCHA input field with selector: {selector}")
                 break
         except Exception as e:
-            print(f"Error finding input with selector {selector}: {str(e)}")
             continue
     
-    # Step 3: Find the submit button - try multiple common selectors
+    # Find submit button
     submit_button = None
     for selector in [
         "button[type='submit']", 
@@ -79,99 +60,133 @@ async def solve_captcha(page: Page) -> str:
         "input.a-button-input",
         "button:has-text('Continue')",
         "button:has-text('Submit')",
-        "input[name='submit']",
         ".a-button-input",
-        "form button", # Any button in a form
-        "button", # Any button
-        "[role='button']" # Accessibility role
+        "form button", 
+        "button", 
+        "[role='button']" 
     ]:
         try:
             submit_button = await page.query_selector(selector)
             if submit_button:
                 print(f"Found submit button with selector: {selector}")
                 break
-        except Exception as e:
-            print(f"Error finding button with selector {selector}: {str(e)}")
+        except Exception:
             continue
     
-    # Step 4: If we couldn't find elements by selectors, try to get visual coordinates
-    if not input_field or not submit_button:
-        print("Couldn't find elements by selectors, attempting visual search...")
-        try:
-            coordinates = await get_element_coordinates(screenshot_base64)
-            
-            if coordinates and "input_field" in coordinates and "submit_button" in coordinates:
-                input_x = coordinates["input_field"]["x"]
-                input_y = coordinates["input_field"]["y"]
-                submit_x = coordinates["submit_button"]["x"]
-                submit_y = coordinates["submit_button"]["y"]
-                
-                # Use the coordinates
-                print(f"Using visual coordinates - input: ({input_x},{input_y}), submit: ({submit_x},{submit_y})")
-                await page.mouse.click(input_x, input_y)
-                await page.keyboard.type(captcha_text)
-                await asyncio.sleep(1)
-                await page.mouse.click(submit_x, submit_y)
-                
-                # Return early since we've handled everything
-                await asyncio.sleep(3)  # Wait for form submission
-                return f"CAPTCHA solved with text: {captcha_text} (using visual coordinates)"
-            
-        except Exception as e:
-            print(f"Error in visual element detection: {e}")
-    
-    # Step 5: Enter the CAPTCHA text if we found the input field
+    # Enter the CAPTCHA text
+    success = False
     if input_field:
-        # First, try to clear the field
         try:
-            await input_field.fill("")  # Clear the field first
-            await input_field.type(captcha_text, delay=100)  # Type slowly
+            await input_field.fill("")
+            await input_field.type(captcha_text, delay=50)
             print(f"Entered CAPTCHA text: {captcha_text}")
-        except Exception as e:
-            print(f"Error entering CAPTCHA text: {e}. Trying alternative method.")
-            # Fallback: click and type
+            success = True
+        except Exception:
             try:
                 await input_field.click()
-                # Clear field with keyboard
                 await page.keyboard.press("Control+a")
                 await page.keyboard.press("Delete")
-                # Type text
-                await page.keyboard.type(captcha_text, delay=100)
-                print(f"Entered CAPTCHA text with alternative method: {captcha_text}")
-            except Exception as e2:
-                print(f"Both input methods failed: {e2}")
-    else:
-        print("⚠️ Could not find CAPTCHA input field, attempting fallback...")
-        # Fallback: try to send keystrokes to the page
-        await page.keyboard.press("Tab")  # Try to focus on an input field
-        await page.keyboard.type(captcha_text, delay=100)
+                await page.keyboard.type(captcha_text)
+                success = True
+            except Exception:
+                pass
     
-    # Step 6: Submit the form if we found the button
+    if not success:
+        # Try clicking in the center and typing
+        try:
+            viewport = page.viewport_size
+            center_x = viewport["width"] // 2
+            center_y = viewport["height"] // 2
+            await page.mouse.click(center_x, center_y)
+            await page.keyboard.type(captcha_text)
+            success = True
+        except Exception:
+            pass
+    
+    # Submit the form
     if submit_button:
-        await asyncio.sleep(1)  # Brief pause before clicking
         try:
             await submit_button.click()
             print("Clicked submit button")
-        except Exception as e:
-            print(f"Error clicking submit button: {e}. Trying JavaScript click.")
-            # Try using JavaScript click as fallback
+        except Exception:
             try:
                 await page.evaluate("(button) => button.click()", submit_button)
-                print("Clicked submit button with JavaScript")
-            except Exception as e2:
-                print(f"Both click methods failed: {e2}")
+            except Exception:
+                await page.keyboard.press("Enter")
     else:
-        print("⚠️ Could not find submit button, attempting fallback...")
-        # Fallback: try to press Enter
         await page.keyboard.press("Enter")
     
-    # Step 7: Wait for navigation after submission
+    # Wait briefly
     await asyncio.sleep(3)
     
-    # Return the result
-    result = f"CAPTCHA solved with text: {captcha_text}"
-    print(result)
-    return result
+    # Check if we're still on a CAPTCHA page
+    current_url = page.url
+    current_title = await page.title()
+    current_content = await page.content()
+    
+    still_captcha = (
+        "captcha" in current_url.lower() or
+        "robot check" in current_title.lower() or
+        "captcha" in current_content.lower() or
+        "robot check" in current_content.lower()
+    )
+    
+    return {
+        "text": captcha_text,
+        "success": not still_captcha,
+        "message": f"CAPTCHA {'solution attempt' if still_captcha else 'solved'} with text: {captcha_text}"
+    }
+
+async def simple_captcha_solve(image_base64: str) -> str:
+    """Simplified CAPTCHA solver that's more robust to API changes"""
+    client = OpenAI()
+    
+    try:
+        # Try direct vision analysis with simple prompt
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert CAPTCHA solver. Extract ONLY the letters from the CAPTCHA image. Amazon CAPTCHAs ONLY use letters (A-Z), never numbers. Return ONLY the letters, no explanation."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text", 
+                            "text": "Extract the CAPTCHA text from this image. Remember that Amazon CAPTCHAs only use letters (A-Z), never numbers. ONLY return the letters, nothing else."
+                        },
+                        {
+                            "type": "image_url", 
+                            "image_url": {"url": f"data:image/png;base64,{image_base64}"}
+                        }
+                    ]
+                }
+            ],
+            temperature=0.0
+        )
+        
+        text = response.choices[0].message.content.strip()
+        # Clean extremely aggressively - allow ONLY letters A-Z
+        text = re.sub(r'[^a-zA-Z]', '', text)
+        
+        # Convert to uppercase as Amazon CAPTCHAs are typically uppercase
+        text = text.upper()
+        
+        # Validate length - Amazon CAPTCHAs are typically 6 characters
+        if len(text) > 8:
+            text = text[:8]  # Truncate if somehow too long
+        elif len(text) < 4:
+            print(f"Warning: Extracted CAPTCHA text is suspiciously short: '{text}'")
+        
+        if text:
+            return text
+    except Exception as e:
+        print(f"Error in simple_captcha_solve: {e}")
+    
+    # If we get here, something failed - return a fallback of 6 uppercase letters
+    return "ABCDEF"
 
 async def get_multiple_captcha_solutions(image_base64: str) -> List[Tuple[str, float]]:
     """
@@ -188,13 +203,13 @@ async def get_multiple_captcha_solutions(image_base64: str) -> List[Tuple[str, f
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert CAPTCHA solver. Analyze the image and provide the 3 most likely solutions for the CAPTCHA with confidence percentages. Return your answer as a JSON array with objects containing 'text' and 'confidence' fields. Format must be JSON."
+                    "content": "You are an expert CAPTCHA solver. Analyze the image and provide the 3 most likely solutions for the CAPTCHA with confidence percentages. Amazon CAPTCHAs only use letters (A-Z), never numbers. Return your answer as a JSON array with objects containing 'text' and 'confidence' fields."
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "What are the 3 most likely solutions for this CAPTCHA? Provide each potential solution with a confidence percentage."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
+                        {"type": "input_text", "text": "What are the 3 most likely solutions for this Amazon CAPTCHA? Remember it only uses letters, not numbers. Provide each potential solution with a confidence percentage."},
+                        {"type": "input_image", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
                     ]
                 }
             ],
@@ -217,6 +232,12 @@ async def get_multiple_captcha_solutions(image_base64: str) -> List[Tuple[str, f
                         solutions.append((text, confidence))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             print(f"Error parsing multi-solution JSON: {e}")
+        
+        # After extraction, additionally filter solutions to ensure they contain only letters
+        for i, (solution, confidence) in enumerate(solutions):
+            cleaned_solution = re.sub(r'[^a-zA-Z]', '', solution).upper()
+            if cleaned_solution != solution:
+                solutions[i] = (cleaned_solution, confidence)
     except Exception as e:
         print(f"Error with multi-solution method: {e}")
     
@@ -232,8 +253,8 @@ async def get_multiple_captcha_solutions(image_base64: str) -> List[Tuple[str, f
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Analyze this CAPTCHA character by character. For each position, what is the most likely character and your confidence?"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
+                        {"type": "input_text", "text": "Analyze this CAPTCHA character by character. For each position, what is the most likely character and your confidence?"},
+                        {"type": "input_image", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
                     ]
                 }
             ],
@@ -261,8 +282,8 @@ async def get_multiple_captcha_solutions(image_base64: str) -> List[Tuple[str, f
             {
                 "role": "user", 
                 "content": [
-                    {"type": "text", "text": "Extract the CAPTCHA text from this image. Return ONLY the characters."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
+                    {"type": "input_text", "text": "Extract the CAPTCHA text from this image. Return ONLY the characters."},
+                    {"type": "input_image", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
                 ]
             }
         ])
@@ -296,8 +317,8 @@ async def get_element_coordinates(image_base64: str) -> Optional[Dict]:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Find the x,y coordinates of: 1) The CAPTCHA input field, 2) The submit button. Return a JSON object with 'input_field' and 'submit_button' properties, each containing 'x' and 'y' coordinates."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
+                        {"type": "input_text", "text": "Find the x,y coordinates of: 1) The CAPTCHA input field, 2) The submit button. Return a JSON object with 'input_field' and 'submit_button' properties, each containing 'x' and 'y' coordinates."},
+                        {"type": "input_image", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
                     ]
                 }
             ],
@@ -325,30 +346,30 @@ async def emergency_ocr(image_base64: str) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": "Extract ONLY the characters visible in the CAPTCHA image. NO explanations, ONLY the characters."
+                    "content": "Extract ONLY the letters visible in the Amazon CAPTCHA image. Amazon CAPTCHAs only use letters (A-Z), never numbers. NO explanations, ONLY the UPPERCASE letters."
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "What characters do you see in this CAPTCHA?"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
+                        {"type": "input_text", "text": "What letters do you see in this Amazon CAPTCHA? Remember it only contains letters, not numbers."},
+                        {"type": "input_image", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
                     ]
                 }
             ]
         )
         
         text = response.choices[0].message.content
-        # Clean extremely aggressively
-        text = re.sub(r'[^a-zA-Z0-9]', '', text)
-        text = text.strip()
+        # Clean extremely aggressively - only allow letters
+        text = re.sub(r'[^a-zA-Z]', '', text)
+        text = text.strip().upper()
         
-        # Truncate if somehow still too long
-        if len(text) > 10:
-            text = text[:10]
+        # Validate typical Amazon CAPTCHA length
+        if len(text) > 8:
+            text = text[:8]  # Truncate if somehow too long
             
         print(f"Emergency OCR extracted: {text}")
         return text
     except Exception as e:
         print(f"Emergency OCR failed: {e}")
-        # Return a fallback response if all else fails
-        return "ABCDE12345"
+        # Return a fallback response using only letters
+        return "doesnt look like anything to me"

@@ -69,6 +69,40 @@ async def simple_supervisor():
                     "solve this puzzle" in page_content.lower()
                 )
                 
+                # Check if we're on the Amazon search results page after finding mangos
+                on_search_results = (
+                    "amazon.com" in page_url and 
+                    ("s?k=mango" in page_url or "mango" in page_url.lower()) and
+                    not captcha_detected and
+                    mango_finder_invoked and
+                    not select_item_invoked
+                )
+                
+                # Check if we're on a product detail page
+                on_product_page = "/dp/" in page_url and not captcha_detected
+                
+                # Check if we're already on the cart page
+                on_cart_page = "cart" in page_url.lower() and "amazon.com" in page_url
+                
+                # Auto-trigger item selection if we're on search results
+                if on_search_results:
+                    print("\n----- ON MANGO SEARCH RESULTS PAGE -----")
+                    print("Automatically proceeding to product selection...")
+                    
+                    # Call the item selector agent to pick a product
+                    selection_result = await select_item_agent(page)
+                    select_item_invoked = True
+                    
+                    print(f"Item selector completed with status: {selection_result['status']}")
+                    if "product_page" in selection_result:
+                        print(f"Product page reached: {selection_result['product_page']}")
+                    if "cart_added" in selection_result:
+                        print(f"Added to cart: {selection_result['cart_added']}")
+                    
+                    # Wait for page to stabilize after selection
+                    await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                    continue  # Take a new screenshot and reassess
+                
                 # Check if we're on the Amazon homepage after solving a CAPTCHA
                 on_amazon_homepage = (
                     "amazon.com" in page_url and 
@@ -132,7 +166,7 @@ async def simple_supervisor():
                     # Try a more patient approach to waiting for load
                     print("Waiting for page to stabilize after CAPTCHA submission...")
                     try:
-                        await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                        await wait_for_page_with_fallback(page, "networkidle", timeout=10000)
                         print("Page stabilized after CAPTCHA submission")
                     except Exception as e:
                         print(f"Warning: Timeout waiting for page stabilization: {e}")
@@ -163,9 +197,196 @@ async def simple_supervisor():
                     
                     continue  # Take a new screenshot and reassess
                 
-                # Rest of the logic (decision making, etc.)
-                # ...existing code...
+                # Determine if this is the Amazon homepage (for clearer decision-making)
+                is_amazon_homepage = (
+                    "amazon.com" in page_url and 
+                    not "s?k=" in page_url and
+                    not "/dp/" in page_url
+                )
                 
+                # Send to OpenAI for analysis using GPT-4 Vision to decide next action
+                print("Analyzing screenshot with OpenAI to decide next action...")
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a supervisor agent that analyzes Amazon screenshots and decides the best next action. "
+                                "Your goal is to help order mango slices from Amazon. "
+                                f"Current state: {'Amazon homepage' if is_amazon_homepage else 'Amazon page'}, "
+                                f"CAPTCHA just solved: {captcha_just_solved}, "
+                                f"Search already performed: {mango_finder_invoked}, "
+                                f"Product selection already performed: {select_item_invoked}\n\n"
+                                "Based on what you see, choose ONE of these actions:\n"
+                                "1. USE_IMHUMAN: If you see a CAPTCHA or robot check\n"
+                                "2. USE_MANGO_FINDER: If you're on the Amazon homepage or need to search for mango slices\n"
+                                "3. USE_ITEM_SELECTOR: If you see search results and need to select a product\n"
+                                "4. FINISHED: If the goal has been achieved (product selected or added to cart)\n"
+                                "Respond with ONLY ONE of these action codes and a brief explanation."
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Analyze this Amazon page and decide the next action to take for ordering mango slices:"},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
+                            ]
+                        }
+                    ],
+                    max_tokens=150
+                )
+                
+                # Extract the recommendation
+                decision = response.choices[0].message.content
+                print("\n----- SUPERVISOR DECISION -----")
+                print(decision)
+                print("-------------------------------------\n")
+                
+                # Process the decision
+                if "USE_IMHUMAN" in decision:
+                    print("Supervisor detected possible CAPTCHA. Invoking imhuman agent...")
+                    await solve_captcha(page)
+                    await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                    captcha_just_solved = True
+                    
+                elif "USE_MANGO_FINDER" in decision:
+                    print("\n----- INVOKING MANGO FINDER AGENT -----")
+                    print("Delegating search task to specialized mango finder agent...")
+                    
+                    # Call the mango finder agent to search for mangos
+                    mango_result = await mango_finder_agent(page)
+                    mango_finder_invoked = True
+                    captcha_just_solved = False  # Reset the flag
+                    
+                    print(f"Mango finder agent completed with status: {mango_result['status']}")
+                    print(f"Current URL: {mango_result['url']}")
+                    
+                    if mango_result['status'] == 'complete':
+                        print("Successfully found mango products!")
+                    else:
+                        print("Mango finder had trouble completing the task.")
+                        
+                        # Check if we might have hit a CAPTCHA
+                        post_search_content = await page.content()
+                        if ("captcha" in post_search_content.lower() or 
+                            "robot" in post_search_content.lower()):
+                            print("Possible CAPTCHA detected after mango search.")
+                            captcha_just_solved = False
+                    
+                    # Wait for page to stabilize after mango finder actions
+                    await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                    
+                elif "USE_ITEM_SELECTOR" in decision:
+                    print("\n----- INVOKING ITEM SELECTOR AGENT -----")
+                    
+                    # Call the item selector agent to pick a product
+                    selection_result = await select_item_agent(page)
+                    select_item_invoked = True
+                    captcha_just_solved = False  # Reset the flag
+                    
+                    print(f"Item selector completed with status: {selection_result['status']}")
+                    if "product_page" in selection_result:
+                        print(f"Product page reached: {selection_result['product_page']}")
+                    if "cart_added" in selection_result:
+                        print(f"Added to cart: {selection_result['cart_added']}")
+                    
+                    # Wait for page to stabilize after selection
+                    await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                    
+                # Verify cart contents if goal appears to be achieved or select_item_agent was invoked
+                if select_item_invoked and not on_cart_page and "FINISHED" in decision:
+                    print("\n----- VERIFYING GOAL ACHIEVEMENT -----")
+                    print("Navigating to cart to verify mango product was added...")
+                    
+                    # Navigate to the Amazon cart page
+                    try:
+                        await page.goto("https://www.amazon.com/gp/cart/view.html?ref_=nav_cart")
+                        await wait_for_page_with_fallback(page, "networkidle", timeout=10000)
+                        
+                        # Take screenshot of cart
+                        cart_screenshot = await page.screenshot(full_page=True)
+                        cart_screenshot_base64 = base64.b64encode(cart_screenshot).decode("utf-8")
+                        
+                        # Check if cart has mango products
+                        cart_page_content = await page.content()
+                        cart_verification = client.chat.completions.create(
+                            model="gpt-4o",
+                            messages=[
+                                {
+                                    "role": "system",
+                                    "content": "Verify if there are any mango products in this Amazon shopping cart. Answer only YES or NO, followed by a brief explanation."
+                                },
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": "Does this Amazon cart contain any mango products?"},
+                                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{cart_screenshot_base64}"}}
+                                    ]
+                            }
+                            ],
+                            max_tokens=100
+                        )
+                        
+                        cart_check_result = cart_verification.choices[0].message.content
+                        print(f"Cart verification result: {cart_check_result}")
+                        
+                        # Check if cart has items (based on both vision model and page content)
+                        cart_has_mangos = "YES" in cart_check_result.upper() or (
+                            "mango" in cart_page_content.lower() and 
+                            not "empty" in cart_page_content.lower() and
+                            not "was removed" in cart_page_content.lower()
+                        )
+                        
+                        if cart_has_mangos:
+                            print("✅ SUCCESS: Mango product confirmed in cart!")
+                            return_to_previous_page = False  # Stay on cart page as we're done
+                            break  # Exit the loop as we've achieved our goal
+                        else:
+                            print("❌ FAILURE: No mango products found in cart!")
+                            print("Returning to previous page to try again...")
+                            await page.goto(page_url)  # Return to previous page
+                            await wait_for_page_with_fallback(page, "networkidle", timeout=10000)
+                            select_item_invoked = False  # Reset so we can try again
+                    except Exception as e:
+                        print(f"Error during cart verification: {e}")
+                
+                elif "FINISHED" in decision:
+                    # Before concluding, verify we have actually added items to cart
+                    if not on_cart_page:
+                        print("Supervisor believes goal is achieved, but let's verify by checking the cart...")
+                        continue  # Continue to next iteration, which will trigger cart verification above
+                    else:
+                        # We're already on the cart page, so check if it has mango products
+                        cart_page_content = await page.content()
+                        if "mango" in cart_page_content.lower() and not "empty" in cart_page_content.lower():
+                            print("\n----- GOAL ACHIEVED -----")
+                            print("Supervisor confirmed mango products in cart. Goal achieved!")
+                            break
+                        else:
+                            print("⚠️ Supervisor believes goal is achieved, but cart appears empty or without mango products.")
+                            print("Continuing workflow to try again...")
+                            select_item_invoked = False  # Reset so we can try again
+                
+                # Check if we've accomplished a sub-goal based on URL alone
+                if not mango_finder_invoked and ("s?k=mango" in page_url or "mango" in page_url.lower()):
+                    print("Search results detected - marking mango finder step as completed.")
+                    mango_finder_invoked = True
+                
+                if not select_item_invoked and "/dp/" in page_url:
+                    print("Product page detected - marking item selection step as completed.")
+                    select_item_invoked = True
+                
+                # Ask if the user wants to continue or take manual action
+                print("\nContinue to next interaction? Press Enter or type 'exit' to stop:")
+                user_input = await asyncio.get_event_loop().run_in_executor(None, input)
+                if user_input.lower() == "exit":
+                    break
+                
+                # Reset captcha_just_solved if not acted upon (safety mechanism)
+                if captcha_just_solved and interaction_count > 1:
+                    captcha_just_solved = False
+            
             # Wait for user to press Enter before closing
             print("\nWorkflow completed. Press Enter to close the browser...")
             await asyncio.get_event_loop().run_in_executor(None, input)
@@ -182,7 +403,7 @@ async def simple_supervisor():
         finally:
             await browser.close()
 
-async def wait_for_page_with_fallback(page, state="networkidle", timeout=30000):
+async def wait_for_page_with_fallback(page, state="networkidle", timeout=10000):
     """
     More robust page waiting function that falls back to simpler approaches
     if the main approach fails.
