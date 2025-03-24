@@ -1,3 +1,5 @@
 openai-agents
 Flask
 pytest-playwright
+plum-sdk
+dotenv

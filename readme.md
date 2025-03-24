@@ -26,11 +26,7 @@
 3. Activate it: `source venv/bin/activate`
 4. Install dependencies: `pip install -r requirements.txt`
 
-## Running the Flask Web Application
+## Running the Application
 1. Ensure your virtual environment is activated.
 1. install the browser for Playright (for computer-use assistance) `playwright install`
-2. Start the application by running:
-   ```
-   python webapp.py
-   ```
-3. Open your browser and navigate to http://127.0.0.1:5000 to interact with the app.
+1. `python .\cua_mangomax.py` 
