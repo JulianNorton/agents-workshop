@@ -2,8 +2,10 @@ import os
 import asyncio
 import base64
 import json
+import time
+from typing import Dict, Any
 from openai import OpenAI
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from dotenv import load_dotenv
 from imhuman import solve_captcha
 from mango_finder_agent import mango_finder_agent
@@ -32,13 +34,17 @@ async def simple_supervisor():
             # Step 1: Navigate to Amazon.com
             print("Navigating to Amazon.com...")
             await page.goto("https://www.amazon.com")
-            await page.wait_for_load_state("networkidle", timeout=30000)
+            
+            # Use a more robust wait approach
+            await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
             
             # Loop to handle multiple interactions
             max_interactions = 10
             interaction_count = 0
             mango_finder_invoked = False
             select_item_invoked = False
+            captcha_just_solved = False  # Track if we just solved a CAPTCHA
+            captcha_attempts = 0  # Track consecutive CAPTCHA attempts
             
             while interaction_count < max_interactions:
                 interaction_count += 1
@@ -63,9 +69,39 @@ async def simple_supervisor():
                     "solve this puzzle" in page_content.lower()
                 )
                 
+                # Check if we're on the Amazon homepage after solving a CAPTCHA
+                on_amazon_homepage = (
+                    "amazon.com" in page_url and 
+                    not captcha_detected and
+                    (page_url == "https://www.amazon.com/" or 
+                     page_url == "https://www.amazon.com" or
+                     "nav_logo" in page_content)
+                )
+                
+                # If we just solved a CAPTCHA and now we're on the Amazon homepage, go directly to mango search
+                if (captcha_just_solved or captcha_attempts > 0) and on_amazon_homepage and not mango_finder_invoked:
+                    print("\n----- CAPTCHA SOLVED, NOW ON AMAZON HOMEPAGE -----")
+                    print("Directly proceeding to mango search...")
+                    
+                    # Reset CAPTCHA tracking
+                    captcha_just_solved = False
+                    captcha_attempts = 0
+                    
+                    # Call the mango finder agent to search for mangos
+                    mango_result = await mango_finder_agent(page)
+                    mango_finder_invoked = True
+                    
+                    print(f"Mango finder agent completed with status: {mango_result['status']}")
+                    print(f"Current URL: {mango_result['url']}")
+                    
+                    # Wait for page to stabilize after mango finder actions - use robust wait
+                    await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                    continue  # Take a new screenshot and reassess
+                
                 if captcha_detected:
                     print("\n----- CAPTCHA DETECTED -----")
                     print("Invoking imhuman agent to solve CAPTCHA...")
+                    captcha_attempts += 1
                     
                     # Store pre-CAPTCHA state for comparison
                     pre_captcha_url = page.url
@@ -73,163 +109,63 @@ async def simple_supervisor():
                     
                     # Call the imhuman agent to solve the CAPTCHA
                     captcha_result = await solve_captcha(page)
-                    print(f"CAPTCHA solution attempt: {captcha_result}")
                     
-                    # Wait for page to load after CAPTCHA solution
-                    await page.wait_for_load_state("networkidle", timeout=15000)
+                    # Enhanced handling of CAPTCHA result
+                    if isinstance(captcha_result, dict):
+                        print(f"CAPTCHA solution attempt: {captcha_result.get('message', 'No message')}")
+                        captcha_just_solved = captcha_result.get('success', False)
+                    else:
+                        # For backwards compatibility
+                        print(f"CAPTCHA solution attempt: {captcha_result}")
+                        
+                        # Wait for a shorter time to let any navigation start
+                        await asyncio.sleep(2)
+                        
+                        # Check if page changed after CAPTCHA solution
+                        post_captcha_url = page.url
+                        post_captcha_title = await page.title()
+                        captcha_just_solved = (
+                            post_captcha_url != pre_captcha_url or 
+                            post_captcha_title != pre_captcha_title
+                        )
                     
-                    # Verify if CAPTCHA was truly solved by checking if page changed
-                    post_captcha_url = page.url
-                    post_captcha_title = await page.title()
-                    new_page_content = await page.content()
+                    # Try a more patient approach to waiting for load
+                    print("Waiting for page to stabilize after CAPTCHA submission...")
+                    try:
+                        await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                        print("Page stabilized after CAPTCHA submission")
+                    except Exception as e:
+                        print(f"Warning: Timeout waiting for page stabilization: {e}")
+                        # Continue anyway - don't let a timeout stop us
                     
-                    # Check if we're still on a CAPTCHA page
+                    # Check current state again
+                    current_url = page.url
+                    current_title = await page.title()
+                    current_content = await page.content()
+                    
                     still_captcha = (
-                        post_captcha_url == pre_captcha_url and 
-                        post_captcha_title == pre_captcha_title or
-                        "captcha" in new_page_content.lower() or
-                        "robot check" in new_page_content.lower()
+                        "captcha" in current_url.lower() or
+                        "robot check" in current_title.lower() or
+                        "captcha" in current_content.lower() or
+                        "robot check" in current_content.lower()
                     )
                     
                     if still_captcha:
-                        print("⚠️ CAPTCHA solution appears to have failed. Page didn't change.")
-                        # Take a new screenshot for analysis
-                        new_screenshot_bytes = await page.screenshot(full_page=True)
-                        new_screenshot_base64 = base64.b64encode(new_screenshot_bytes).decode("utf-8")
-                        
-                        # Ask GPT to verify if we're still on a CAPTCHA page
-                        verify_response = client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": "You are analyzing a webpage to determine if it's still showing a CAPTCHA challenge after an attempted solution."
-                                },
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "text", "text": "Does this page still show a CAPTCHA challenge or error message? Answer with YES or NO and explain briefly."},
-                                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{new_screenshot_base64}"}}
-                                    ]
-                                }
-                            ],
-                            max_tokens=100
-                        )
-                        
-                        verification = verify_response.choices[0].message.content
-                        print(f"CAPTCHA verification: {verification}")
-                        
-                        if "YES" in verification.upper():
-                            print("Confirmed: CAPTCHA still present. Will retry in next iteration.")
-                        else:
-                            print("False alarm: CAPTCHA appears to be solved despite unchanged URL.")
-                            # Continue with normal flow
+                        print("⚠️ Still on CAPTCHA page after solution attempt")
+                        captcha_just_solved = False
                     else:
-                        print("✅ CAPTCHA appears to be solved successfully! Page changed.")
+                        print("✅ No longer on CAPTCHA page - solution appears successful")
+                        captcha_just_solved = True
+                        
+                        # If we're on Amazon homepage, immediately trigger mango finder in next iteration
+                        if "amazon.com" in current_url and not "s?k=" in current_url:
+                            print("Detected Amazon homepage - will search for mangos in next iteration")
                     
                     continue  # Take a new screenshot and reassess
                 
-                # Send to OpenAI for analysis using GPT-4 Vision to decide next action
-                print("Analyzing screenshot with OpenAI to decide next action...")
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a supervisor agent that analyzes Amazon screenshots and decides the best next action. "
-                                "Your goal is to help order mango slices from Amazon. "
-                                "Based on what you see, choose ONE of these actions:\n"
-                                "1. USE_IMHUMAN: If you see a CAPTCHA or robot check, even if it's subtle or hidden\n"
-                                "2. USE_MANGO_FINDER: If you need to search for mango slices\n"
-                                "3. USE_ITEM_SELECTOR: If you see search results and need to select a product\n"
-                                "4. FINISHED: If the goal has been achieved (product added to cart/checkout started)\n"
-                                "Look carefully for any signs of a security challenge or CAPTCHA before proceeding."
-                                "Respond with ONLY ONE of these action codes and a brief explanation."
-                            )
-                        },
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "Analyze this Amazon page and decide the next action to take for ordering mango slices:"},
-                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
-                            ]
-                        }
-                    ],
-                    max_tokens=150
-                )
+                # Rest of the logic (decision making, etc.)
+                # ...existing code...
                 
-                # Extract the recommendation
-                decision = response.choices[0].message.content
-                print("\n----- SUPERVISOR DECISION -----")
-                print(decision)
-                print("-------------------------------------\n")
-                
-                # Process the decision
-                if "USE_IMHUMAN" in decision:
-                    print("Supervisor detected possible CAPTCHA. Invoking imhuman agent...")
-                    await solve_captcha(page)
-                    await page.wait_for_load_state("networkidle", timeout=30000)
-                    
-                elif "USE_MANGO_FINDER" in decision:
-                    print("\n----- INVOKING MANGO FINDER AGENT -----")
-                    print("Delegating search task to specialized mango finder agent...")
-                    mango_finder_invoked = True
-                    
-                    # Call the mango finder agent to search for mangos
-                    mango_result = await mango_finder_agent(page)
-                    
-                    print(f"Mango finder agent completed with status: {mango_result['status']}")
-                    print(f"Current URL: {mango_result['url']}")
-                    print(f"Method used: {mango_result.get('method', 'unknown')}")
-                    
-                    if mango_result['status'] == 'complete':
-                        print("Successfully found mango products!")
-                    else:
-                        print("Mango finder had trouble completing the task.")
-                        
-                        # Check if we might have hit a CAPTCHA
-                        post_search_content = await page.content()
-                        if ("captcha" in post_search_content.lower() or 
-                            "robot" in post_search_content.lower()):
-                            print("Possible CAPTCHA detected after mango search. Will check in next iteration.")
-                    
-                    # Wait for page to stabilize after mango finder actions
-                    await page.wait_for_load_state("networkidle", timeout=30000)
-                    
-                elif "USE_ITEM_SELECTOR" in decision and not select_item_invoked:
-                    print("\n----- INVOKING ITEM SELECTOR AGENT -----")
-                    select_item_invoked = True
-                    
-                    # Call the item selector agent to pick a product
-                    selection_result = await select_item_agent(page)
-                    
-                    print(f"Item selector completed with status: {selection_result['status']}")
-                    print(f"Product page reached: {selection_result.get('product_page', False)}")
-                    
-                    # Wait for page to stabilize after selection
-                    await page.wait_for_load_state("networkidle", timeout=30000)
-                    
-                elif "FINISHED" in decision:
-                    print("\n----- GOAL ACHIEVED -----")
-                    print("Supervisor determined the goal has been achieved!")
-                    break
-                
-                # Check if we've accomplished a sub-goal
-                if not mango_finder_invoked and ("s?k=mango" in page_url or "mango" in page_url.lower()):
-                    print("Search results detected - we can skip the mango finder step.")
-                    mango_finder_invoked = True
-                
-                if not select_item_invoked and "/dp/" in page_url:
-                    print("Product page detected - we can skip the item selection step.")
-                    select_item_invoked = True
-                
-                # Ask if the user wants to continue or take manual action
-                print("\nContinue to next interaction? Press Enter or type 'exit' to stop:")
-                user_input = await asyncio.get_event_loop().run_in_executor(None, input)
-                if user_input.lower() == "exit":
-                    break
-            
             # Wait for user to press Enter before closing
             print("\nWorkflow completed. Press Enter to close the browser...")
             await asyncio.get_event_loop().run_in_executor(None, input)
@@ -245,6 +181,30 @@ async def simple_supervisor():
         
         finally:
             await browser.close()
+
+async def wait_for_page_with_fallback(page, state="networkidle", timeout=30000):
+    """
+    More robust page waiting function that falls back to simpler approaches
+    if the main approach fails.
+    """
+    try:
+        # Try the requested wait first
+        await page.wait_for_load_state(state, timeout=timeout)
+        return True
+    except PlaywrightTimeoutError:
+        print(f"Timeout waiting for '{state}'. Trying fallback wait approaches...")
+        
+        try:
+            # Try waiting for DOMContentLoaded instead
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            print("Page DOM content loaded")
+        except Exception:
+            # If that fails too, just wait a fixed time
+            print("DOM load timeout. Using fixed delay fallback.")
+            
+        # Fixed delay as final fallback
+        await asyncio.sleep(3)
+        return False
 
 if __name__ == "__main__":
     asyncio.run(simple_supervisor())

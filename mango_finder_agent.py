@@ -2,7 +2,7 @@ import asyncio
 import base64
 import json
 from typing import Optional, Dict, Any
-from playwright.async_api import Page
+from playwright.async_api import Page, TimeoutError
 from openai import OpenAI
 from agents import Agent, Runner, function_tool
 
@@ -49,14 +49,13 @@ async def search_with_cua(page: Page) -> Dict[str, Any]:
     """Use the Computer-Using Agent to search for mango slices on Amazon."""
     client = OpenAI()
     
-    # Initialize the CUA loop
     print("Starting Mango Finder with CUA model...")
     
     # Take initial screenshot to start the CUA loop
     screenshot_bytes = await page.screenshot(full_page=True)
     screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
     
-    # Initial request to the model with correct content format
+    # Initial request to the model with CORRECT format based on documentation
     try:
         response = client.responses.create(
             model="computer-use-preview",
@@ -66,15 +65,23 @@ async def search_with_cua(page: Page) -> Dict[str, Any]:
                 "display_height": int(page.viewport_size["height"]),
                 "environment": "browser"
             }],
-            input=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Go to Amazon.com and search for 'mango slices'. "
-                                            "If you're already on Amazon, just search for mango slices. "
-                                            "Wait for the search results to load."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
-                ]
-            }],
+            input=[
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "text", 
+                        "text": "Go to Amazon.com and search for 'mango slices'. If you're already on Amazon, just search for mango slices. Wait for the search results to load."
+                    }]
+                },
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64", 
+                        "media_type": "image/png", 
+                        "data": screenshot_base64
+                    }
+                }
+            ],
             reasoning={
                 "generate_summary": "concise",
             },
@@ -170,8 +177,12 @@ async def search_with_cua(page: Page) -> Dict[str, Any]:
             "call_id": call_id,
             "type": "computer_call_output",
             "output": {
-                "type": "computer_screenshot",
-                "image_url": f"data:image/png;base64,{screenshot_base64}"
+                "type": "image",
+                "source": {
+                    "type": "base64", 
+                    "media_type": "image/png", 
+                    "data": screenshot_base64
+                }
             }
         }]
         
@@ -227,68 +238,170 @@ async def search_manually(page: Page) -> Dict[str, Any]:
             await page.goto("https://www.amazon.com")
             await page.wait_for_load_state("networkidle", timeout=30000)
         
-        # Find and use the search box with multiple selector attempts
+        # Find and use the search box - improved approach
         search_success = False
-        selectors = [
+        
+        # More robust approach to finding and using the search box
+        search_field_found = False
+        
+        # Method 1: Try common selectors with improved error handling
+        for selector in [
             "input#twotabsearchtextbox", 
             "input[type='text']", 
             "input[name='field-keywords']",
             ".nav-search-field input",
             "[aria-label='Search']"
-        ]
-        
-        for selector in selectors:
+        ]:
             try:
                 print(f"Trying selector: {selector}")
-                search_box = await page.query_selector(selector)
                 
-                if search_box:
-                    print(f"Found search box with selector: {selector}")
-                    # Clear existing text if any
-                    await search_box.click({clickCount: 3})  # Triple-click to select all text
-                    await page.keyboard.press("Delete")
-                    
-                    # Type search query and submit
-                    await search_box.type("mango slices", delay=50)
-                    await page.keyboard.press("Enter")
-                    await page.wait_for_load_state("networkidle", timeout=30000)
-                    
-                    print("Search query submitted, waiting for results...")
-                    # Allow extra time for search results to load
-                    await asyncio.sleep(3)
-                    
-                    # Verify search was successful
-                    current_url = page.url
-                    if "s?k=mango+slices" in current_url or "mango" in current_url.lower():
-                        print("Successfully searched for mango slices!")
+                # Check if element exists first
+                element = await page.query_selector(selector)
+                if not element:
+                    print(f"Element not found with selector: {selector}")
+                    continue
+                
+                # Element exists, now try to interact with it
+                print(f"Found search box with selector: {selector}")
+                
+                # Click on the search field (properly)
+                await element.click()
+                
+                # Select all existing text and delete it
+                await page.keyboard.press("Control+a")
+                await page.keyboard.press("Backspace")
+                
+                # Type the search query
+                await page.keyboard.type("mango slices")
+                await page.keyboard.press("Enter")
+                
+                # Wait for search results
+                print("Search query submitted, waiting for results...")
+                try:
+                    # Wait for URL to change to indicate search
+                    await page.wait_for_url("**/s?k=*mango*", timeout=10000)
+                    search_success = True
+                    search_field_found = True
+                    print("Search completed successfully!")
+                    break
+                except TimeoutError:
+                    print("Timeout waiting for search results URL. Will verify another way.")
+                    # Even if URL didn't change as expected, check if page content did
+                    if "mango slices" in await page.content():
                         search_success = True
+                        search_field_found = True
+                        print("Search appears successful based on page content!")
                         break
             except Exception as e:
-                print(f"Error with selector {selector}: {e}")
+                print(f"Error with selector {selector}: {str(e)}")
                 continue
         
-        # If no selector worked, try a more direct approach
-        if not search_success:
-            print("Direct selectors failed, trying alternative approach...")
+        # Method 2: If selectors failed, try clicking at common positions where search box might be
+        if not search_field_found:
+            print("Direct selectors failed, trying positional click approach...")
             try:
-                # Focus on the page and use keyboard shortcuts
-                await page.keyboard.press("Tab")  # Try to focus on an interactive element
-                await page.keyboard.press("/")    # Some sites use / as a shortcut to search
+                # Try clicking near the top of the page where search boxes typically are
+                for y_pos in [50, 75, 100]:
+                    for x_pos in [300, 400, 500, 600]:
+                        try:
+                            # Click at position
+                            await page.mouse.click(x_pos, y_pos)
+                            await asyncio.sleep(0.5)
+                            
+                            # Type search query
+                            await page.keyboard.press("Control+a")  # Select all existing text
+                            await page.keyboard.press("Backspace") # Clear existing text
+                            await page.keyboard.type("mango slices")
+                            await page.keyboard.press("Enter")
+                            
+                            # Wait for a moment to see if page changes
+                            await asyncio.sleep(2)
+                            
+                            # Check if search happened
+                            if "mango" in page.url or "mango" in await page.content():
+                                print(f"Position-based search successful at ({x_pos}, {y_pos})!")
+                                search_success = True
+                                break
+                        except Exception as e:
+                            print(f"Error with position ({x_pos}, {y_pos}): {str(e)}")
+                            continue
+                    
+                    if search_success:
+                        break
+            except Exception as e:
+                print(f"Error in positional search approach: {str(e)}")
+        
+        # Method 3: Try keyboard shortcuts that might focus the search bar
+        if not search_success:
+            print("Trying keyboard shortcut approach...")
+            try:
+                # Some sites use / to focus search
+                await page.keyboard.press("/")
                 await asyncio.sleep(1)
                 
                 # Type search text
                 await page.keyboard.type("mango slices")
                 await page.keyboard.press("Enter")
-                await page.wait_for_load_state("networkidle", timeout=30000)
                 
-                # Check if search worked
-                if "s?k=mango+slices" in page.url or "mango" in page.url.lower():
-                    print("Alternative search approach succeeded!")
+                # Wait a moment to see if page changes
+                await asyncio.sleep(3)
+                
+                # Check if search happened
+                if "mango" in page.url or "mango" in await page.content():
+                    print("Keyboard shortcut search successful!")
                     search_success = True
             except Exception as e:
-                print(f"Alternative search approach failed: {e}")
+                print(f"Keyboard shortcut approach failed: {str(e)}")
         
-        # Return the result
+        # Method 4: Last resort - try to inject JavaScript to perform the search
+        if not search_success:
+            print("Trying JavaScript injection as last resort...")
+            try:
+                # Use JavaScript to locate and interact with the search field
+                search_script = """
+                // Try to find the search input
+                let searchInput = document.querySelector('input[type="text"]') || 
+                                 document.querySelector('input[name="field-keywords"]') ||
+                                 document.querySelector('#twotabsearchtextbox') ||
+                                 Array.from(document.querySelectorAll('input')).find(el => 
+                                    el.placeholder && el.placeholder.toLowerCase().includes('search'));
+                
+                if (searchInput) {
+                    // Focus on the input
+                    searchInput.focus();
+                    // Clear existing value
+                    searchInput.value = '';
+                    // Set new value
+                    searchInput.value = 'mango slices';
+                    
+                    // Try to submit the form if available
+                    let form = searchInput.closest('form');
+                    if (form) {
+                        form.submit();
+                        return true;
+                    }
+                    
+                    // If no form, simulate Enter key
+                    const enterEvent = new KeyboardEvent('keydown', {
+                        bubbles: true, cancelable: true, keyCode: 13
+                    });
+                    searchInput.dispatchEvent(enterEvent);
+                    return true;
+                }
+                
+                return false;
+                """
+                
+                search_success = await page.evaluate(search_script)
+                if search_success:
+                    print("JavaScript-based search successful!")
+                    await asyncio.sleep(5)  # Give more time for JS redirect to complete
+                else:
+                    print("JavaScript could not find a search input")
+            except Exception as e:
+                print(f"JavaScript injection approach failed: {str(e)}")
+        
+        # Return the final result
         return {
             "url": page.url,
             "status": "complete" if search_success else "incomplete",
