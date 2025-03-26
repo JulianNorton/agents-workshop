@@ -344,7 +344,7 @@ async def search_manually(page: Page) -> Dict[str, Any]:
                 await page.keyboard.press("Enter")
                 
                 # Wait a moment to see if page changes
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
                 
                 # Check if search happened
                 if "mango" in page.url or "mango" in await page.content():

@@ -403,7 +403,7 @@ async def simple_supervisor():
         finally:
             await browser.close()
 
-async def wait_for_page_with_fallback(page, state="networkidle", timeout=10000):
+async def wait_for_page_with_fallback(page, state="networkidle", timeout=5000):
     """
     More robust page waiting function that falls back to simpler approaches
     if the main approach fails.

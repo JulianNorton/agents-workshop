@@ -15,6 +15,7 @@ This example demonstrates a deterministic flow, where each step is performed by 
 """
 
 strategy_outline_agent = Agent(
+    model="gpt-4o-2024-08-06",
     name="strategy_outline_agent",
     instructions="Generate a very short go-to-market strategy for a brand new startup based on the user's input.",
 )

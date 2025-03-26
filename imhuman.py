@@ -10,11 +10,11 @@ from openai import OpenAI
 
 # This Agent is used as a fallback method for CAPTCHA solving
 # It's only invoked in the get_multiple_captcha_solutions method which is UNUSED in the main flow
-captcha_ocr_agent = Agent(
-    name="CAPTCHA OCR Agent",
-    instructions="You are an expert at solving CAPTCHAs. Examine the image and extract ONLY the CAPTCHA characters or text. Return ONLY the characters with no additional text or explanations.",
-    model="gpt-4o"  # Using the most capable model for CAPTCHA solving
-)
+# captcha_ocr_agent = Agent(
+#     name="CAPTCHA OCR Agent",
+#     instructions="You are an expert at solving CAPTCHAs. Examine the image and extract ONLY the CAPTCHA characters or text. Return ONLY the characters with no additional text or explanations.",
+#     model="gpt-4o"
+# )
 
 async def solve_captcha(page: Page) -> Dict:
     """
@@ -145,7 +145,7 @@ async def solve_captcha(page: Page) -> Dict:
     
     # PHASE 5: Wait for the form submission to process
     # This delay allows the page to transition after submission
-    await asyncio.sleep(3)
+    await asyncio.sleep(2)
     
     # PHASE 6: Verify if we solved the CAPTCHA successfully
     # Check multiple indicators to see if we're still on the CAPTCHA page
