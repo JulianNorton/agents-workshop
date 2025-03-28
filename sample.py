@@ -15,7 +15,7 @@ This example demonstrates a deterministic flow, where each step is performed by 
 """
 
 strategy_outline_agent = Agent(
-    model="gpt-4o-2024-08-06",
+    # model="gpt-4o-2024-08-06",
     name="strategy_outline_agent",
     instructions="Generate a very short go-to-market strategy for a brand new startup based on the user's input.",
 )
@@ -57,7 +57,7 @@ async def main():
             outline_result.final_output,
         )
 
-        # 3. Add a gate to stop if the outline is not good quality or not a scifi story
+        # 3. Add a gate to stop if the outline is not good or relevant
         assert isinstance(outline_checker_result.final_output, OutlineCheckerOutput)
         if not outline_checker_result.final_output.good_quality:
             print("Strategy is not good quality, so we stop here.")

@@ -48,7 +48,7 @@ async def select_item_agent(page: Page) -> Dict[str, Any]:
                     "content": "Find a good dried mango product on this Amazon search page, click on it to go to the product page, and then add it to your cart."
                 },
                 {
-                    "type": "input_image",  # FIXED: Changed from "computer_screenshot" to "input_image"
+                    "type": "input_image",
                     "image_url": f"data:image/png;base64,{screenshot_base64}"
                 }
             ],
