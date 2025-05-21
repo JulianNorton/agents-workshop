@@ -16,7 +16,7 @@
 
 **On Windows:**
 1. Open a terminal.
-2. Run: `python -m venv venv`
+2. Run: `python -m venv venv` (skip if you already have a .\venv...)
 3. Activate it: `.\venv\Scripts\activate`
 4. Install dependencies: `pip install -r requirements.txt`
 

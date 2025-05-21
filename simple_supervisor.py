@@ -36,7 +36,7 @@ async def simple_supervisor():
             await page.goto("https://www.amazon.com")
             
             # Use a more robust wait approach
-            await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+            await wait_for_page_with_fallback(page, "networkidle", timeout=10000)
             
             # Loop to handle multiple interactions
             max_interactions = 10
@@ -100,7 +100,7 @@ async def simple_supervisor():
                         print(f"Added to cart: {selection_result['cart_added']}")
                     
                     # Wait for page to stabilize after selection
-                    await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                    await wait_for_page_with_fallback(page, "networkidle", timeout=10000)
                     continue  # Take a new screenshot and reassess
                 
                 # Check if we're on the Amazon homepage after solving a CAPTCHA
@@ -129,7 +129,7 @@ async def simple_supervisor():
                     print(f"Current URL: {mango_result['url']}")
                     
                     # Wait for page to stabilize after mango finder actions - use robust wait
-                    await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                    await wait_for_page_with_fallback(page, "networkidle", timeout=10000)
                     continue  # Take a new screenshot and reassess
                 
                 if captcha_detected:
@@ -247,7 +247,7 @@ async def simple_supervisor():
                 if "USE_IMHUMAN" in decision:
                     print("Supervisor detected possible CAPTCHA. Invoking imhuman agent...")
                     await solve_captcha(page)
-                    await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                    await wait_for_page_with_fallback(page, "networkidle", timeout=10000)
                     captcha_just_solved = True
                     
                 elif "USE_MANGO_FINDER" in decision:
@@ -275,7 +275,7 @@ async def simple_supervisor():
                             captcha_just_solved = False
                     
                     # Wait for page to stabilize after mango finder actions
-                    await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                    await wait_for_page_with_fallback(page, "networkidle", timeout=10000)
                     
                 elif "USE_ITEM_SELECTOR" in decision:
                     print("\n----- INVOKING ITEM SELECTOR AGENT -----")
@@ -292,7 +292,7 @@ async def simple_supervisor():
                         print(f"Added to cart: {selection_result['cart_added']}")
                     
                     # Wait for page to stabilize after selection
-                    await wait_for_page_with_fallback(page, "networkidle", timeout=30000)
+                    await wait_for_page_with_fallback(page, "networkidle", timeout=10000)
                     
                 # Verify cart contents if goal appears to be achieved or select_item_agent was invoked
                 if select_item_invoked and not on_cart_page and "FINISHED" in decision:
@@ -364,7 +364,7 @@ async def simple_supervisor():
                             print("Supervisor confirmed mango products in cart. Goal achieved!")
                             break
                         else:
-                            print("⚠️ Supervisor believes goal is achieved, but cart appears empty or without mango products.")
+                            print("⚠️ Supervisor believes goal is achieved, manually verify if the cart is correct.")
                             print("Continuing workflow to try again...")
                             select_item_invoked = False  # Reset so we can try again
                 

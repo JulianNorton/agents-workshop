@@ -236,7 +236,7 @@ async def search_manually(page: Page) -> Dict[str, Any]:
         if "amazon.com" not in page.url:
             print("Navigating to Amazon.com...")
             await page.goto("https://www.amazon.com")
-            await page.wait_for_load_state("networkidle", timeout=30000)
+            await page.wait_for_load_state("networkidle", timeout=10000)
         
         # Find and use the search box - improved approach
         search_success = False
